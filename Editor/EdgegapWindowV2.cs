@@ -44,6 +44,8 @@ namespace Edgegap.Editor
             EdgegapWindowMetadata.LOG_LEVEL == EdgegapWindowMetadata.LogLevel.Debug;
         private bool _isApiTokenVerified; // Toggles the rest of the UI
         private bool _isVerifyingToken;
+        [NonSerialized]
+        private bool _uiCallbacksRegistered;
 
         private GetRegistryCredentialsResult _credentials;
         private string _userExternalIp;
@@ -509,6 +511,7 @@ namespace Edgegap.Editor
         /// </summary>
         private void registerUICallbacks()
         {
+            _uiCallbacksRegistered = true;
             _headerLogoImage.RegisterCallback<ClickEvent>(OpenGettingStartedUrl);
             _debugBtn.clickable.clicked += OnDebugBtnClick;
 
@@ -590,6 +593,13 @@ namespace Edgegap.Editor
         /// </summary>
         private void unregisterUICallbacks()
         {
+            // the window can be disabled before its UI was ever built (e.g. script reload)
+            if (!_uiCallbacksRegistered)
+            {
+                return;
+            }
+            _uiCallbacksRegistered = false;
+
             _headerLogoImage?.UnregisterCallback<ClickEvent>(OpenGettingStartedUrl);
             _debugBtn.clickable.clicked -= OnDebugBtnClick;
 
@@ -826,7 +836,23 @@ namespace Edgegap.Editor
                 _apiToken,
                 EdgegapWindowMetadata.LOG_LEVEL
             );
-            EdgegapHttpResult initQuickStartResultCode = await wizardApi.InitQuickStart();
+            EdgegapHttpResult initQuickStartResultCode;
+            try
+            {
+                initQuickStartResultCode = await wizardApi.InitQuickStart();
+            }
+            catch (Exception e)
+            {
+                // e.g. no network: unlock the "Verify" btn again and tell the user
+                _signOutBtn.SetEnabled(true);
+                _isVerifyingToken = false;
+                UpdateUI();
+                Debug.LogWarning($"Edgegap API token verification failed: {e.Message}");
+                ShowErrorDialog(
+                    $"Couldn't reach Edgegap to verify your API token, please try again.\n\n{e.Message}"
+                );
+                return;
+            }
 
             _signOutBtn.SetEnabled(true);
             _isApiTokenVerified = initQuickStartResultCode.IsResultCode204;
@@ -835,6 +861,7 @@ namespace Edgegap.Editor
             if (!_isApiTokenVerified)
             {
                 UpdateUI();
+                ShowTokenVerificationError(initQuickStartResultCode);
                 return;
             }
 
@@ -872,6 +899,33 @@ namespace Edgegap.Editor
 
             // Unlock the rest of the form, whether we prefill the container registry or not
             UpdateUI();
+        }
+
+        /// <summary>
+        /// Tells the user why the API token was refused, instead of only leaving the window disabled.
+        /// </summary>
+        private void ShowTokenVerificationError(EdgegapHttpResult result)
+        {
+            string apiMessage = null;
+            try
+            {
+                apiMessage = string.IsNullOrEmpty(result.Json) ? null : result.Error?.ErrorMessage;
+            }
+            catch (Exception)
+            {
+                // response body isn't the usual {"message": ""} json
+            }
+
+            string reason =
+                $"Error {(int)result.StatusCode}: "
+                + (string.IsNullOrEmpty(apiMessage) ? result.ReasonPhrase : apiMessage);
+
+            string hint = result.IsResultCode403
+                ? "This plugin requires a token created through the plugin's sign in, tokens created in the dashboard are not accepted."
+                : "Please sign in again to get a new token.";
+
+            Debug.LogWarning($"Edgegap API token verification failed. {reason}");
+            ShowErrorDialog($"Edgegap API token verification failed.\n\n{reason}\n\n{hint}");
         }
 
         /// <summary>
@@ -1021,12 +1075,15 @@ namespace Edgegap.Editor
                 BuildReport buildResult = EdgegapBuildUtils.BuildServer(folderName);
                 if (buildResult.summary.result != BuildResult.Succeeded)
                 {
-                    Debug.LogWarning(buildResult.summary.result.ToString());
+                    // surface the failure, otherwise the next steps fail later with unrelated errors
+                    throw new Exception(
+                        $"Server build did not succeed (result: {buildResult.summary.result}, "
+                            + $"errors: {buildResult.summary.totalErrors}). "
+                            + "See the Unity Console for details."
+                    );
                 }
-                else
-                {
-                    OnBuildContainerizeUploadSuccess(_serverBuildResultLabel, "Build succeeded.");
-                }
+
+                OnBuildContainerizeUploadSuccess(_serverBuildResultLabel, "Build succeeded.");
 
                 _containerizeFoldout.SetValueWithoutNotify(true);
                 _buildPathInput.SetValueWithoutNotify(_buildPathInputDefault);
