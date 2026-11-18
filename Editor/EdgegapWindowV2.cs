@@ -16,7 +16,6 @@ using UnityEditor;
 using UnityEditor.Build.Reporting;
 using UnityEngine;
 using UnityEngine.UIElements;
-using UnityEditor.VSAttribution.Edgegap;
 using Application = UnityEngine.Application;
 #if !EDGEGAP_PLUGIN_SERVERS
 using UnityEditor.Build;
@@ -862,9 +861,6 @@ namespace Edgegap.Editor
                 _containerProject = _credentials.Project;
                 _containerUsername = _credentials.Username;
                 _containerToken = _credentials.Token;
-
-                //VSA create new user
-                VSAttribution.SendAttributionEvent("verify", "Edgegap", _apiToken);
                 Debug.Log("Edgegap API token verified successfully.");
             }
             else
@@ -1229,7 +1225,11 @@ namespace Edgegap.Editor
             _ = ContainerizeServerAsync();
         }
 
-        private async Task ContainerizeServerAsync()
+        /// <param name="failIfTagInRegistry">
+        /// If true, a custom tag already pushed to the Edgegap registry fails the containerization,
+        /// so the image built here can be uploaded without overwriting an existing tag.
+        /// </param>
+        private async Task ContainerizeServerAsync(bool failIfTagInRegistry = false)
         {
             if (!string.IsNullOrEmpty(await ValidateDockerRequirement()))
             {
@@ -1270,10 +1270,27 @@ namespace Edgegap.Editor
 
                 string imageName = Tokenize(_containerizeImageNameInput.value);
                 string imageRepo = $"{_containerProject}/{imageName}";
-                string tag =
-                    _containerizeImageTagInput.value == _containerizeImageTagInputDefault
-                        ? nowUTC
-                        : _containerizeImageTagInput.value;
+                bool isCustomTag =
+                    _containerizeImageTagInput.value != _containerizeImageTagInputDefault;
+                string tag = isCustomTag ? _containerizeImageTagInput.value.Trim() : nowUTC;
+
+                if (failIfTagInRegistry && isCustomTag)
+                {
+                    ShowWorkInProgress(
+                        "Building Docker Image",
+                        "Checking if the tag already exists in registry"
+                    );
+
+                    bool tagExists = await getRegistryApi().ImageTagExists(imageName, tag);
+
+                    if (tagExists)
+                    {
+                        throw new Exception(
+                            $"Tag '{tag}' already exists for image '{imageName}' in your Edgegap registry."
+                                + " Please use a different tag, or delete the existing tag first."
+                        );
+                    }
+                }
 
                 await EdgegapBuildUtils.RunCommand_DockerBuild(
                     dockerfilePath,
@@ -1725,6 +1742,13 @@ namespace Edgegap.Editor
                 EdgegapWindowMetadata.LOG_LEVEL
             );
 
+        private EdgegapRegistryApi getRegistryApi() =>
+            new EdgegapRegistryApi(
+                EdgegapWindowMetadata.API_ENVIRONMENT,
+                _apiToken,
+                EdgegapWindowMetadata.LOG_LEVEL
+            );
+
         private void OnBuildContainerizeUploadSuccess(Label displayLabel, string txt)
         {
             EditorUtility.ClearProgressBar();
@@ -1753,12 +1777,13 @@ namespace Edgegap.Editor
             }
 
             //Containerize
-            if (_containerizeImageTagInput.value.ToString() != _containerizeImageTagInputDefault)
+            // keep a custom tag if provided, otherwise fall back to the timestamp tag
+            if (string.IsNullOrWhiteSpace(_containerizeImageTagInput.value))
             {
                 _containerizeImageTagInput.SetValueWithoutNotify(_containerizeImageTagInputDefault);
             }
 
-            await ContainerizeServerAsync();
+            await ContainerizeServerAsync(failIfTagInRegistry: true);
 
             if (
                 _containerizeServerResultLabel.text.Contains(EdgegapWindowMetadata.FAIL_COLOR_HEX)
