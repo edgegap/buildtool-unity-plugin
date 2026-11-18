@@ -14,4 +14,6 @@ RUN apt-get update && \
     apt-get clean && \
     update-ca-certificates
 
-CMD ["/bin/bash", "-c", "env;/root/build/ServerBuild -batchmode -nographics $UNITY_COMMANDLINE_ARGS"]
+# exec: the server replaces bash, so it gets the stop signal. No `env` dump: it would print every
+# injected variable, including secrets and the deployment's self-stop token, to the deployment logs.
+CMD ["/bin/bash", "-c", "exec /root/build/ServerBuild -batchmode -nographics $UNITY_COMMANDLINE_ARGS"]
