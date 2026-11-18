@@ -1,0 +1,75 @@
+# Keeps the sample/* and partner/* branches identical to main.
+#
+# Projects install this package through Unity Package Manager with git URLs like
+#   git@github.com:edgegap/buildtool-unity-plugin.git#partner/fishnet-source
+# so those branch names must keep existing and must move whenever main moves.
+#
+# Each branch is only ever moved forward (never force-pushed), so commit hashes
+# pinned in existing packages-lock.json files stay reachable.
+#  - If the branch already contains main and has the same files, nothing is done.
+#  - If main already contains the branch tip, the branch is fast-forwarded to main.
+#  - Otherwise a commit is added on top of the branch whose files are exactly main's,
+#    with the branch tip and main as parents (one such commit per main update).
+name: Sync sample and partner branches
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-branches
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Move branches to main
+        env:
+          BRANCH_PATTERNS: "sample/* partner/*"
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          main=$(git rev-parse origin/main)
+          tree=$(git rev-parse "origin/main^{tree}")
+          failed=0
+
+          patterns=()
+          for p in $BRANCH_PATTERNS; do patterns+=("refs/remotes/origin/$p"); done
+
+          for ref in $(git for-each-ref --format='%(refname)' "${patterns[@]}"); do
+            branch=${ref#refs/remotes/origin/}
+            tip=$(git rev-parse "$ref")
+
+            if [ "$tip" = "$main" ] || { git merge-base --is-ancestor "$main" "$tip" && [ "$(git rev-parse "$tip^{tree}")" = "$tree" ]; }; then
+              echo "= $branch is already in sync with main"
+              continue
+            elif git merge-base --is-ancestor "$tip" "$main"; then
+              target=$main
+              how="fast-forward"
+            else
+              target=$(git commit-tree "$tree" -p "$tip" -p "$main" \
+                -m "Sync $branch with main ($(git rev-parse --short "$main"))")
+              how="sync commit with main's files"
+            fi
+
+            if git push origin "$target:refs/heads/$branch"; then
+              echo "> $branch: $how -> $(git rev-parse --short "$target")"
+            else
+              echo "::error::Could not update $branch"
+              failed=1
+            fi
+          done
+
+          exit $failed
